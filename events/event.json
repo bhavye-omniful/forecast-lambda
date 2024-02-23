@@ -1,0 +1,9 @@
+{
+  "method": "moving_avg",
+  "future_period": "7",
+  "window_size": "30",
+  "data_url" : "https://omniful-bucket.s3.eu-central-1.amazonaws.com/zrafhDataLambda.csv",
+  "skus" : [
+    "856553007122"
+  ]
+}
