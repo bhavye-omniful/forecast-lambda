@@ -107,9 +107,13 @@ def lambda_handler(event, context):
         df_forecast.columns = df_forecast.iloc[0]
         df_forecast = df_forecast.drop(df_forecast.columns[0], axis=1)
         df_forecast = df_forecast[1:]
+
+        row_sum = df_forecast.sum(axis=1)
+        avg = row_sum/(future_period*number_of_days)
+        df_forecast['days_in_hand'] = curr_inv/avg
+
         df_forecast.insert(0, "seller_sku_code", sku)
 
-        df_forecast["days_on_hand"] = (df["curr_inventory"]*number_of_days)/
         forecastingResult = pd.concat([forecastingResult, df_forecast], ignore_index=True)
     
     # json_string = json.dumps(forecastingResults)
