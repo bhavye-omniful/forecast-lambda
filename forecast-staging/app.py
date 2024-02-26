@@ -7,9 +7,7 @@ import pandas as pd
 import numpy as np
 import boto3
 import os
-
 from slack import sendErrorToSlack
-from forecastQuantity import forecast_quantity
 
 # Testing event
 # {
@@ -45,6 +43,35 @@ except Exception as e:
         "Error" : f"{e}"
     }))
     sys.exit(f"Terminating Lambda execution due to error : {e}")
+
+class Regression:
+    def __init__(self):
+        pass
+
+    def find_sum(l, p):
+        res = 0
+        for i in l:
+            res += i**p
+        return res
+
+    def find_mul_sum(l1, l2):
+        res = 0
+        for i in range(len(l1)):
+            res += (l1[i]*l2[i])
+        return res
+
+    def solve_equ(sum_x, sum_x2, sum_y, sum_xy):
+        n = 30
+        p = np.array([[sum_x,n], [sum_x2,sum_x]])
+        q = np.array([sum_y, sum_xy])
+        res = np.linalg.solve(p, q)
+        return res
+
+    def predict(x, res):
+        y_pred = []
+        for i in x:
+            y_pred.append(res[0] * i + res[1])
+        return y_pred
 
 def lambda_handler(event, context):
     # print("SQS Event : ", event)
@@ -115,6 +142,7 @@ def lambda_handler(event, context):
     # 0   seller_sku_code  925 non-null    object
     # 1   order_date       925 non-null    object
     # 2   quantity         925 non-null    int64 
+    # 3   curr_inv         925 non-null    int64
 
     df_data['order_date'] = pd.to_datetime(df_data["order_date"],format="%Y-%m-%d")   # converting to appropriate date format
     df_data['order_date'] = df_data['order_date'].dt.date    # conveting to datetime from object
@@ -123,15 +151,26 @@ def lambda_handler(event, context):
     # df_temp = df.groupby(['seller_sku_code'])['ordered_quantity'].sum().reset_index()
     # df_temp.sort_values(by = 'ordered_quantity', ascending = False)
 
+
+
     number_of_days = 0
+    today = datetime.today()
     if interval == 'day' : 
         number_of_days = 1
+        today = today.strftime('%Y-%m-%d')   # YYYY-MM-DD
     elif interval == 'week' :
         number_of_days = 7
+        today = today.strftime('%Y-%U-%w')   #YYYY-WW-D (day of the week, where Monday is 0 and Sunday is 6)
     elif interval == 'month' : 
-        number_of_days = 30
+        number_of_days = 30     
+        today = today.strftime('%Y-%m-01')   # YYYY-MM-01
     elif interval == 'year' :
         number_of_days = 365
+        today = today.strftime('%Y-01-01')   # YYYY-01-01
+
+    dates = pd.date_range(end=today, periods=window_size, freq=f'{number_of_days}D')
+    date_range = pd.DataFrame(dates, columns=['date'])
+    date_range['date'] = pd.to_datetime(date_range['date']).dt.date
 
     forecastingResult = pd.DataFrame()
 
@@ -140,12 +179,15 @@ def lambda_handler(event, context):
     for sku in skus :
         # print("sku ==>", sku)
         
-        curr_inv = df_data['curr_inventory'].iloc[0]
         df = df_data[df_data['seller_sku_code'].astype(str) == str(sku)] 
+        curr_inv = df_data['curr_inventory'].iloc[0]
         df = df.drop('curr_inventory', axis=1)
         df = df.drop('seller_sku_code', axis=1)
 
         df.columns = ['date', 'quantity']
+
+        df = date_range.merge(df, on='date', how='left')
+        df['quantity'] = df['quantity'].fillna(0) 
 
         # print(df)
         # df.plot(x='order_created_at', y='ordered_quantity')
@@ -153,20 +195,24 @@ def lambda_handler(event, context):
         if method == "mean":
             sum = df['quantity'].sum()
             df_forecast = pd.DataFrame()
-            df_forecast["seller_sku_code"] = sku
-            df_forecast["mean"] = sum/window_size
+            df_forecast["seller_sku_code"] = [sku]
+            df_forecast["mean"] = [sum/window_size]
             forecastingResult = pd.concat([forecastingResult, df_forecast], ignore_index=True)
             continue
-
-        # Forecast
-        forecast = forecast_quantity(
-            data = df, 
-            window_size = window_size, # previous history data 7d, 10d etc
-            future_period = future_period, # future forecase next 2d, 3d etc
-            method = method, # 'moving_avg', 'exponential_avg', 'linear_regression'
-            number_of_days = number_of_days # day, week, month, year
-        )
         
+        # Forecast
+        forecast = {}
+        if method == "linear_regression":
+            forecast = linear_regression_forecast(data=df,future_period=future_period, number_of_days=number_of_days)
+        else:
+            forecast = forecast_quantity(
+                data = df, 
+                window_size = window_size, # previous history data 7d, 10d etc
+                future_period = future_period, # future forecase next 2d, 3d etc
+                method = method, # 'moving_avg', 'exponential_avg', 'linear_regression'
+                number_of_days = number_of_days # day, week, month, year
+            )
+
         try:
             df_forecast = pd.DataFrame(forecast).T
             df_forecast = df_forecast.reset_index()
@@ -183,10 +229,13 @@ def lambda_handler(event, context):
 
         row_sum = df_forecast.sum(axis=1)
         avg = row_sum/(future_period*number_of_days)
-        df_forecast['days_in_hand'] = curr_inv/avg
+        df_forecast['days_on_hand'] = 0
+        if not avg.eq(0).all():
+           df_forecast['days_on_hand'] = int(curr_inv/avg)
 
         df_forecast.insert(0, "seller_sku_code", sku)
 
+        # Concatenate the DataFrames
         forecastingResult = pd.concat([forecastingResult, df_forecast], ignore_index=True)
     
     # json_string = json.dumps(forecastingResults)
@@ -233,6 +282,86 @@ def lambda_handler(event, context):
             "sqsResponse": response,
         }),
     }
+
+
+def forecast_quantity(data, window_size, future_period, method, number_of_days):
+    forecasts = []
+    dates = []
+
+    curr_date = data.iloc[-1, 0]
+    
+    curr_data = data[0:window_size]['quantity']
+    
+    if method == 'moving_avg':
+        forecast = moving_average_forecast(curr_data, window_size)
+    elif method == 'exponential_avg':
+        forecast = exponential_smoothing_forecast(curr_data)
+    else:
+        return ValueError("Invalid method. Please choose 'moving_avg', 'exponential_avg'")
+    
+    # Append historical forecast        
+    curr_date += timedelta(days=number_of_days)
+    dates.append(curr_date.strftime("%Y-%m-%d"))
+    
+    forecasts.extend([forecast])
+
+    # Generate forecasts for future periods
+    for idx in range(1, future_period):
+        curr_data = pd.Series(list(curr_data[idx:]) + forecasts[-window_size:], name = "quantity", dtype = 'int64')
+        if method == 'moving_avg':
+            forecast_next = moving_average_forecast(curr_data, window_size)
+        else: #method == 'exponential_avg':
+            forecast_next = exponential_smoothing_forecast(curr_data)
+            
+        # Append historical forecast
+        
+        curr_date += timedelta(days=number_of_days)
+        dates.append(curr_date.strftime("%Y-%m-%d"))
+        forecasts.append(forecast_next)
+
+    return {'date': dates, 'quantity': forecasts}
+
+def exponential_smoothing_forecast(data, alpha = 0.3):    
+    return round(data.ewm(alpha=alpha, adjust=False).mean().values[-1])
+
+def moving_average_forecast(data, window_size):
+    rolling_mean = data.rolling(window=window_size).mean()
+
+    if pd.notna(rolling_mean.values[-1]):
+        # Round and return the value if it's not NaN
+        return round(rolling_mean.values[-1])
+    else:
+        # Handle NaN case (e.g., return a default value)
+        return 0  # Replace 0 with your desired default value
+    
+
+def linear_regression_forecast(data, future_period, number_of_days):
+    reference_date = pd.to_datetime('2022-01-01').date()  # Choose a reference date
+    # Create a new column representing the number of days since the reference date
+    data['date_ref'] = (data['date'] - reference_date)
+
+    x = data['date_ref'].values
+    y = data['quantity'].values
+    r = Regression
+
+    sum_x = r.find_sum(x, 1)
+    sum_y = r.find_sum(y, 1)
+    sum_x2 = r.find_sum(x, 2)
+    sum_xy = r.find_mul_sum(x, y)
+
+    res = []
+    res = r.solve_equ(sum_x, sum_x2, sum_y, sum_xy)
+
+    last_date = data.iloc[-1, 0] + timedelta(days=number_of_days) 
+     
+    future_dates = pd.date_range(start=last_date, periods=future_period, freq=f'{number_of_days}D')
+    future_dates = pd.DataFrame(future_dates)
+    future_dates.columns = ['date']
+    future_dates['date_ref'] = (future_dates['date'] - reference_date).dt.days
+    y_pred_future = r.predict(future_dates['date_ref'].values, res)
+
+    return {'date': future_dates['date'].values, 'quantity': y_pred_future} 
+    
 
 # ----------------------------------------------------------------
 # jsonEvent = {
