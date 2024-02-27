@@ -171,13 +171,21 @@ def lambda_handler(event, context):
             continue
 
         # Forecast
-        forecast = forecast_quantity(
-            data = df, 
-            window_size = window_size, # previous history data 7d, 10d etc
-            future_period = future_period, # future forecase next 2d, 3d etc
-            method = method, # 'moving_avg', 'exponential_avg', 'linear_regression'
-            number_of_days = number_of_days # day, week, month, year
-        )
+        forecast = {}
+        if method == 'linear_regression':
+            forecast = linear_regression(
+                data=df,
+                future_period=future_period,
+                number_of_days=number_of_days
+            )
+        else:
+            forecast = forecast_quantity(
+                data = df, 
+                window_size = window_size, # previous history data 7d, 10d etc
+                future_period = future_period, # future forecase next 2d, 3d etc
+                method = method, # 'moving_avg', 'exponential_avg', 'linear_regression'
+                number_of_days = number_of_days # day, week, month, year
+            )
 
         try:
             df_forecast = pd.DataFrame(forecast).T
@@ -262,12 +270,6 @@ def forecast_quantity(data, window_size, future_period, method, number_of_days):
         forecast = moving_average_forecast(curr_data, window_size)
     elif method == 'exponential_avg':
         forecast = exponential_smoothing_forecast(curr_data)
-    elif method == 'linear_regression':
-        forecast_data = linear_regression_forecast(curr_data, future_period)
-        for _ in range(future_period):
-            curr_date += timedelta(days=1)
-            dates.append(curr_date.strftime("%Y-%m-%d"))
-        return {'date': dates, 'quantity': forecast_data}
     else:
         return ValueError("Invalid method. Please choose 'moving_avg', 'exponential_avg', or 'linear_regression'.")
     
@@ -294,14 +296,6 @@ def forecast_quantity(data, window_size, future_period, method, number_of_days):
 
     return {'date': dates, 'quantity': forecasts}
 
-def linear_regression_forecast(data, future_period):
-    X = np.arange(len(data)).reshape(-1, 1)
-    model = "LinearRegression()" #TODO
-    model.fit(X, data)
-    pred_vals = model.predict(np.array([range(len(data), len(data) + future_period)]).reshape(-1,1))
-    
-    return [ round(pred_val) for pred_val in pred_vals ]
-
 def exponential_smoothing_forecast(data, alpha = 0.3):    
     return round(data.ewm(alpha=alpha, adjust=False).mean().values[-1])
 
@@ -315,6 +309,35 @@ def moving_average_forecast(data, window_size):
         # Handle NaN case (e.g., return a default value)
         return 0  # Replace 0 with your desired default value
     
+def linear_regression(data, number_of_days, future_period):
+    # Extracting day of the year as a feature
+    data['day_of_year'] = pd.to_datetime(data['date']).dt.dayofyear
+
+    # Splitting the data into features (X) and target variable (y)
+    X = data[['day_of_year']]
+    y = data['quantity']
+
+    # Adding a column of ones to the features for the intercept term
+    X = np.c_[np.ones(X.shape[0]), X]
+
+    # Calculating the coefficients using the normal equation
+    # theta = (X^T * X)^(-1) * X^T * y
+    theta = np.linalg.inv(X.T @ X) @ X.T @ y
+
+    last_date = data.iloc[-1, 0]
+    future_dates = pd.date_range(start=last_date + pd.Timedelta(days=number_of_days), periods=future_period, freq=f'{number_of_days}D')
+
+    future_day_of_year = future_dates.dayofyear.values
+
+    future_features = np.c_[np.ones(len(future_day_of_year)), future_day_of_year]
+
+    predicted_quantity = future_features @ theta
+
+    # Creating a dictionary for the predicted values
+    return {
+        'date': future_dates,
+        'quantity': predicted_quantity
+    }
 
 # ----------------------------------------------------------------
 # jsonEvent = {
