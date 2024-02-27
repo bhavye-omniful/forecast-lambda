@@ -44,35 +44,6 @@ except Exception as e:
     }))
     sys.exit(f"Terminating Lambda execution due to error : {e}")
 
-class Regression:
-    def __init__(self):
-        pass
-
-    def find_sum(l, p):
-        res = 0
-        for i in l:
-            res += i**p
-        return res
-
-    def find_mul_sum(l1, l2):
-        res = 0
-        for i in range(len(l1)):
-            res += (l1[i]*l2[i])
-        return res
-
-    def solve_equ(sum_x, sum_x2, sum_y, sum_xy):
-        n = 30
-        p = np.array([[sum_x,n], [sum_x2,sum_x]])
-        q = np.array([sum_y, sum_xy])
-        res = np.linalg.solve(p, q)
-        return res
-
-    def predict(x, res):
-        y_pred = []
-        for i in x:
-            y_pred.append(res[0] * i + res[1])
-        return y_pred
-
 def lambda_handler(event, context):
     # print("SQS Event : ", event)
     print("Event Record : ", event)
@@ -151,8 +122,6 @@ def lambda_handler(event, context):
     # df_temp = df.groupby(['seller_sku_code'])['ordered_quantity'].sum().reset_index()
     # df_temp.sort_values(by = 'ordered_quantity', ascending = False)
 
-
-
     number_of_days = 0
     today = datetime.today()
     if interval == 'day' : 
@@ -160,7 +129,8 @@ def lambda_handler(event, context):
         today = today.strftime('%Y-%m-%d')   # YYYY-MM-DD
     elif interval == 'week' :
         number_of_days = 7
-        today = today.strftime('%Y-%U-%w')   #YYYY-WW-D (day of the week, where Monday is 0 and Sunday is 6)
+        today = today - timedelta(days=today.weekday() + 1)
+        today = today.strftime('%Y-%m-%d')
     elif interval == 'month' : 
         number_of_days = 30     
         today = today.strftime('%Y-%m-01')   # YYYY-MM-01
@@ -199,19 +169,15 @@ def lambda_handler(event, context):
             df_forecast["mean"] = [sum/window_size]
             forecastingResult = pd.concat([forecastingResult, df_forecast], ignore_index=True)
             continue
-        
+
         # Forecast
-        forecast = {}
-        if method == "linear_regression":
-            forecast = linear_regression_forecast(data=df,future_period=future_period, number_of_days=number_of_days)
-        else:
-            forecast = forecast_quantity(
-                data = df, 
-                window_size = window_size, # previous history data 7d, 10d etc
-                future_period = future_period, # future forecase next 2d, 3d etc
-                method = method, # 'moving_avg', 'exponential_avg', 'linear_regression'
-                number_of_days = number_of_days # day, week, month, year
-            )
+        forecast = forecast_quantity(
+            data = df, 
+            window_size = window_size, # previous history data 7d, 10d etc
+            future_period = future_period, # future forecase next 2d, 3d etc
+            method = method, # 'moving_avg', 'exponential_avg', 'linear_regression'
+            number_of_days = number_of_days # day, week, month, year
+        )
 
         try:
             df_forecast = pd.DataFrame(forecast).T
@@ -296,8 +262,15 @@ def forecast_quantity(data, window_size, future_period, method, number_of_days):
         forecast = moving_average_forecast(curr_data, window_size)
     elif method == 'exponential_avg':
         forecast = exponential_smoothing_forecast(curr_data)
+    elif method == 'linear_regression':
+        forecast_data = linear_regression_forecast(curr_data, future_period)
+        for _ in range(future_period):
+            curr_date += timedelta(days=1)
+            dates.append(curr_date.strftime("%Y-%m-%d"))
+        return {'date': dates, 'quantity': forecast_data}
     else:
-        return ValueError("Invalid method. Please choose 'moving_avg', 'exponential_avg'")
+        return ValueError("Invalid method. Please choose 'moving_avg', 'exponential_avg', or 'linear_regression'.")
+    
     
     # Append historical forecast        
     curr_date += timedelta(days=number_of_days)
@@ -321,6 +294,14 @@ def forecast_quantity(data, window_size, future_period, method, number_of_days):
 
     return {'date': dates, 'quantity': forecasts}
 
+def linear_regression_forecast(data, future_period):
+    X = np.arange(len(data)).reshape(-1, 1)
+    model = "LinearRegression()" #TODO
+    model.fit(X, data)
+    pred_vals = model.predict(np.array([range(len(data), len(data) + future_period)]).reshape(-1,1))
+    
+    return [ round(pred_val) for pred_val in pred_vals ]
+
 def exponential_smoothing_forecast(data, alpha = 0.3):    
     return round(data.ewm(alpha=alpha, adjust=False).mean().values[-1])
 
@@ -333,34 +314,6 @@ def moving_average_forecast(data, window_size):
     else:
         # Handle NaN case (e.g., return a default value)
         return 0  # Replace 0 with your desired default value
-    
-
-def linear_regression_forecast(data, future_period, number_of_days):
-    reference_date = pd.to_datetime('2022-01-01').date()  # Choose a reference date
-    # Create a new column representing the number of days since the reference date
-    data['date_ref'] = (data['date'] - reference_date)
-
-    x = data['date_ref'].values
-    y = data['quantity'].values
-    r = Regression
-
-    sum_x = r.find_sum(x, 1)
-    sum_y = r.find_sum(y, 1)
-    sum_x2 = r.find_sum(x, 2)
-    sum_xy = r.find_mul_sum(x, y)
-
-    res = []
-    res = r.solve_equ(sum_x, sum_x2, sum_y, sum_xy)
-
-    last_date = data.iloc[-1, 0] + timedelta(days=number_of_days) 
-     
-    future_dates = pd.date_range(start=last_date, periods=future_period, freq=f'{number_of_days}D')
-    future_dates = pd.DataFrame(future_dates)
-    future_dates.columns = ['date']
-    future_dates['date_ref'] = (future_dates['date'] - reference_date).dt.days
-    y_pred_future = r.predict(future_dates['date_ref'].values, res)
-
-    return {'date': future_dates['date'].values, 'quantity': y_pred_future} 
     
 
 # ----------------------------------------------------------------
