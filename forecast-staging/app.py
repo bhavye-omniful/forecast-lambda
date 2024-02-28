@@ -150,7 +150,7 @@ def lambda_handler(event, context):
         # print("sku ==>", sku)
         
         df = df_data[df_data['seller_sku_code'].astype(str) == str(sku)] 
-        curr_inv = df_data['curr_inventory'].iloc[0]
+        curr_inv = df['curr_inventory'].iloc[0]
         df = df.drop('curr_inventory', axis=1)
         df = df.drop('seller_sku_code', axis=1)
 
@@ -205,9 +205,11 @@ def lambda_handler(event, context):
         avg = row_sum/(future_period*number_of_days)
         df_forecast['days_on_hand'] = 0
         if not avg.eq(0).all():
-           df_forecast['days_on_hand'] = int(curr_inv/avg)
+           res = int(curr_inv/avg)
+           df_forecast['days_on_hand'] = res
 
         df_forecast.insert(0, "seller_sku_code", sku)
+        df_forecast['current_inventory'] = curr_inv
 
         # Concatenate the DataFrames
         forecastingResult = pd.concat([forecastingResult, df_forecast], ignore_index=True)
@@ -223,7 +225,7 @@ def lambda_handler(event, context):
 
         csv_buffer.seek(0)
 
-        unique_filename = f"output_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex}.csv"
+        unique_filename = f"output_{datetime.now().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex}_{method}.csv"
 
         s3.upload_fileobj(csv_buffer, bucket_name, s3_path + "/" + unique_filename)
         forecast_csv_result = f"https://{bucket_name}.s3.eu-central-1.amazonaws.com/{s3_path}/{unique_filename}"
