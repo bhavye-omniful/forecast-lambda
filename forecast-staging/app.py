@@ -332,6 +332,7 @@ def linear_regression(data, number_of_days, future_period):
     future_features = np.c_[np.ones(len(future_day_of_year)), future_day_of_year]
 
     predicted_quantity = future_features @ theta
+    predicted_quantity = [int(x) for x in predicted_quantity]
 
     # Creating a dictionary for the predicted values
     return {
