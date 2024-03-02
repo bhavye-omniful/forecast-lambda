@@ -201,10 +201,10 @@ def lambda_handler(event, context):
             }))
             return 
 
-        row_sum = df_forecast.sum(axis=1)
+        row_sum = df_forecast.iloc[0,:].sum()
         avg = row_sum/(future_period*number_of_days)
         df_forecast['days_on_hand'] = 0
-        if not avg.eq(0).all():
+        if avg != 0:
            res = int(curr_inv/avg)
            df_forecast['days_on_hand'] = res
 
